@@ -23,9 +23,7 @@ declare module "pdfjs-dist/legacy/build/pdf" {
   export default _default;
 }
 
-declare module "pdfjs-dist/legacy/build/pdf.js" {
+declare module 'pdfjs-dist/legacy/build/pdf.js' {
   export const GlobalWorkerOptions: any;
-  export function getDocument(src: any): { promise: Promise<any>; };
-  const _default: any;
-  export default _default;
+  export function getDocument(src: any, options?: any): any;
 }
