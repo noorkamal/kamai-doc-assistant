@@ -135,14 +135,40 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     const filename = (docRow.filename || "").toLowerCase();
 
     // PDF
-    if (mime.includes("pdf") || filename.endsWith(".pdf")) {
-      try {
-        const pdfRes = await pdfParse(buffer);
-        extractedText = (pdfRes?.text || "").trim();
-      } catch (e: any) {
-        console.error("pdf parse err", e);
-        extractedText = "";
+  import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.js";
+  
+  // If you want you can point the workerSrc to a CDN path; in Node this isn't needed but set to empty.
+  GlobalWorkerOptions.workerSrc = "";
+  
+  if (mime.includes("pdf") || filename.endsWith(".pdf")) {
+    try {
+      // pdfjs expects a Uint8Array
+      const uint8 = new Uint8Array(buffer);
+  
+      // load the document
+      const loadingTask = getDocument({ data: uint8 });
+      const pdf = await loadingTask.promise;
+  
+      const numPages = pdf.numPages || 0;
+      const pages: string[] = [];
+  
+      for (let i = 1; i <= numPages; i++) {
+        try {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const strings = textContent.items?.map((it: any) => ("str" in it ? it.str : "")).filter(Boolean) || [];
+          pages.push(strings.join(" "));
+        } catch (pageErr) {
+          console.error(`pdfjs page ${i} err`, pageErr);
+        }
       }
+  
+      extractedText = pages.join("\n\n").trim();
+    } catch (e: any) {
+      console.error("pdfjs extract err", e);
+      extractedText = "";
+    }
+  }
 
       // DOCX / DOC (mammoth)
     } else if (mime.includes("word") || filename.endsWith(".docx") || filename.endsWith(".doc")) {
