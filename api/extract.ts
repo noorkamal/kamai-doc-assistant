@@ -7,7 +7,7 @@ import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 
 // import pdfjs (legacy node build)
-import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist/webpack';
+import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist/legacy/build/pdf.js';
 // ensure workerSrc is set to empty so pdfjs doesn't attempt to load a worker file at runtime in Node
 GlobalWorkerOptions.workerSrc = "";
 
