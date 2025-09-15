@@ -1,15 +1,18 @@
 // api/extract.ts
-// Vercel Serverless Function - POST body: { doc_id: "<uuid>" }
-// Supports: .pdf, .docx/.doc (mammoth), .pptx (JSZip + fast-xml-parser), fallback utf8 text
-
+// POST body: { doc_id: "<uuid>" }
+// Supports: .pdf (pdfjs-dist), .docx/.doc (mammoth), .pptx (JSZip + fast-xml-parser), fallback text
 import { createClient } from "@supabase/supabase-js";
-import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 
-type VercelReq = any;
-type VercelRes = any;
+// import pdfjs (legacy node build)
+import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.js";
+// ensure workerSrc is set to empty so pdfjs doesn't attempt to load a worker file at runtime in Node
+GlobalWorkerOptions.workerSrc = "";
+
+type Req = any;
+type Res = any;
 
 async function extractFromPptx(buffer: Buffer): Promise<string> {
   const zip = await JSZip.loadAsync(buffer);
@@ -19,8 +22,9 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
     removeNSPrefix: true,
   });
 
-  const slideFiles = Object.keys(zip.files).filter((p) => p.startsWith("ppt/slides/slide") && p.endsWith(".xml"));
-  slideFiles.sort();
+  const slideFiles = Object.keys(zip.files)
+    .filter((p) => p.startsWith("ppt/slides/slide") && p.endsWith(".xml"))
+    .sort();
 
   const slideTexts: string[] = [];
   for (const sPath of slideFiles) {
@@ -28,8 +32,8 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
     if (!file) continue;
     const xmlText = await file.async("text");
     const xmlObj = parser.parse(xmlText);
-    // collect text nodes
     const texts: string[] = [];
+
     const collectText = (node: any) => {
       if (!node || typeof node !== "object") return;
       if ("t" in node) {
@@ -43,14 +47,17 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
         else if (typeof child === "object") collectText(child);
       }
     };
+
     collectText(xmlObj);
     const slideText = texts.join(" ").replace(/\s+/g, " ").trim();
     if (slideText) slideTexts.push(slideText);
   }
 
   // notes (optional)
-  const notesFiles = Object.keys(zip.files).filter((p) => p.startsWith("ppt/notesSlides/notesSlide") && p.endsWith(".xml"));
-  notesFiles.sort();
+  const notesFiles = Object.keys(zip.files)
+    .filter((p) => p.startsWith("ppt/notesSlides/notesSlide") && p.endsWith(".xml"))
+    .sort();
+
   const notesTexts: string[] = [];
   for (const nPath of notesFiles) {
     const file = zip.file(nPath);
@@ -58,6 +65,7 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
     const xmlText = await file.async("text");
     const xmlObj = parser.parse(xmlText);
     const texts: string[] = [];
+
     const collectText = (node: any) => {
       if (!node || typeof node !== "object") return;
       if ("t" in node) {
@@ -71,6 +79,7 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
         else if (typeof child === "object") collectText(child);
       }
     };
+
     collectText(xmlObj);
     const noteText = texts.join(" ").replace(/\s+/g, " ").trim();
     if (noteText) notesTexts.push(noteText);
@@ -84,7 +93,34 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
   return combined.trim();
 }
 
-export default async function handler(req: VercelReq, res: VercelRes) {
+async function extractFromPdf(buffer: Buffer): Promise<string> {
+  try {
+    const uint8 = new Uint8Array(buffer);
+    const loadingTask = getDocument({ data: uint8 });
+    const pdf = await loadingTask.promise;
+    const numPages = pdf.numPages || 0;
+    const pages: string[] = [];
+
+    for (let i = 1; i <= numPages; i++) {
+      try {
+        const page = await pdf.getPage(i);
+        const textContent = await page.getTextContent();
+        const strings =
+          (textContent.items?.map((it: any) => ("str" in it ? it.str : "")).filter(Boolean) as string[]) || [];
+        pages.push(strings.join(" "));
+      } catch (pageErr) {
+        console.error(`pdfjs page ${i} err`, pageErr);
+      }
+    }
+
+    return pages.join("\n\n").trim();
+  } catch (e: any) {
+    console.error("pdfjs extract err", e);
+    return "";
+  }
+}
+
+export default async function handler(req: Req, res: Res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Use POST" });
     return;
@@ -135,43 +171,11 @@ export default async function handler(req: VercelReq, res: VercelRes) {
     const filename = (docRow.filename || "").toLowerCase();
 
     // PDF
-  import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.js";
-  
-  // If you want you can point the workerSrc to a CDN path; in Node this isn't needed but set to empty.
-  GlobalWorkerOptions.workerSrc = "";
-  
-  if (mime.includes("pdf") || filename.endsWith(".pdf")) {
-    try {
-      // pdfjs expects a Uint8Array
-      const uint8 = new Uint8Array(buffer);
-  
-      // load the document
-      const loadingTask = getDocument({ data: uint8 });
-      const pdf = await loadingTask.promise;
-  
-      const numPages = pdf.numPages || 0;
-      const pages: string[] = [];
-  
-      for (let i = 1; i <= numPages; i++) {
-        try {
-          const page = await pdf.getPage(i);
-          const textContent = await page.getTextContent();
-          const strings = textContent.items?.map((it: any) => ("str" in it ? it.str : "")).filter(Boolean) || [];
-          pages.push(strings.join(" "));
-        } catch (pageErr) {
-          console.error(`pdfjs page ${i} err`, pageErr);
-        }
-      }
-  
-      extractedText = pages.join("\n\n").trim();
-    } catch (e: any) {
-      console.error("pdfjs extract err", e);
-      extractedText = "";
+    if (mime.includes("pdf") || filename.endsWith(".pdf")) {
+      extractedText = await extractFromPdf(buffer);
     }
-  }
-
-      // DOCX / DOC (mammoth)
-    } else if (mime.includes("word") || filename.endsWith(".docx") || filename.endsWith(".doc")) {
+    // DOCX / DOC (mammoth)
+    else if (mime.includes("word") || filename.endsWith(".docx") || filename.endsWith(".doc")) {
       try {
         const m = await mammoth.extractRawText({ buffer });
         extractedText = (m?.value || "").trim();
@@ -179,18 +183,17 @@ export default async function handler(req: VercelReq, res: VercelRes) {
         console.error("mammoth err", e);
         extractedText = "";
       }
-
-      // PPTX
-    } else if (mime.includes("presentation") || filename.endsWith(".pptx")) {
+    }
+    // PPTX
+    else if (mime.includes("presentation") || filename.endsWith(".pptx")) {
       try {
         extractedText = await extractFromPptx(buffer);
       } catch (e: any) {
         console.error("pptx parse err", e);
         extractedText = "";
       }
-
-      // fallback: interpret as UTF-8
     } else {
+      // fallback: try to interpret as UTF-8 text
       try {
         extractedText = buffer.toString("utf8").trim();
       } catch {
@@ -214,7 +217,7 @@ export default async function handler(req: VercelReq, res: VercelRes) {
 
     res.status(200).json({ doc_id, status: extractedText ? "processed" : "error", extracted_text_length: extractedText?.length || 0 });
   } catch (e: any) {
-    console.error(e);
+    console.error("extract handler err", e);
     res.status(500).json({ error: e?.message || "server error" });
   }
 }
