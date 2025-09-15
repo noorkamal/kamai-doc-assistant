@@ -24,6 +24,11 @@ declare module "pdfjs-dist/legacy/build/pdf" {
 }
 
 declare module 'pdfjs-dist/legacy/build/pdf.js' {
-  export const GlobalWorkerOptions: any;
-  export function getDocument(src: any, options?: any): any;
+  export const GlobalWorkerOptions: {
+    workerSrc: string;
+  };
+  export function getDocument(
+    src: string | Uint8Array,
+    options?: any
+  ): any;
 }
