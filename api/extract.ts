@@ -1,13 +1,12 @@
 // api/extract.ts
 // POST body: { doc_id: "<uuid>" }
 // Supports: .pdf (pdfjs-dist), .docx/.doc (mammoth), .pptx (JSZip + fast-xml-parser), fallback text
+import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.js';
 import { createClient } from "@supabase/supabase-js";
 import mammoth from "mammoth";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 
-// import pdfjs (legacy node build)
-import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist/legacy/build/pdf.js';
 // ensure workerSrc is set to empty so pdfjs doesn't attempt to load a worker file at runtime in Node
 GlobalWorkerOptions.workerSrc = "";
 
