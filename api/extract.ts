@@ -1,18 +1,52 @@
 // api/extract.ts
+// Vercel Serverless Function
 // POST body: { doc_id: "<uuid>" }
-// Supports: .pdf (pdfjs-dist), .docx/.doc (mammoth), .pptx (JSZip + fast-xml-parser), fallback text
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.js';
+// Supports: .pdf (pdfjs via runtime require), .docx/.doc (mammoth), .pptx (JSZip + fast-xml-parser), fallback text
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+declare const require: any;
+
 import { createClient } from "@supabase/supabase-js";
+import * as fs from "fs"; // only for typings if needed
+// mammoth, jszip, fast-xml-parser can be imported normally (we included type shims)
 import mammoth from "mammoth";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 
-// ensure workerSrc is set to empty so pdfjs doesn't attempt to load a worker file at runtime in Node
-GlobalWorkerOptions.workerSrc = 'pdfjs-dist/legacy/build/pdf.worker.js';
+type VercelReq = any;
+type VercelRes = any;
 
-type Req = any;
-type Res = any;
+// --- load pdfjs at runtime with fallbacks to avoid TS static import issues ---
+let getDocument: any = null;
+let GlobalWorkerOptions: any = null;
 
+try {
+  // try legacy path first
+  // @ts-ignore
+  const pdfjsLegacy = require("pdfjs-dist/legacy/build/pdf.js");
+  if (pdfjsLegacy) {
+    getDocument = pdfjsLegacy.getDocument || pdfjsLegacy.default?.getDocument;
+    GlobalWorkerOptions = pdfjsLegacy.GlobalWorkerOptions || pdfjsLegacy.default?.GlobalWorkerOptions;
+  }
+} catch (e) {
+  // ignore
+}
+
+if (!getDocument) {
+  try {
+    // fallback to package main (some installs expose this)
+    // @ts-ignore
+    const pdfjsMain = require("pdfjs-dist");
+    getDocument = pdfjsMain.getDocument || pdfjsMain.default?.getDocument;
+    GlobalWorkerOptions = pdfjsMain.GlobalWorkerOptions || pdfjsMain.default?.GlobalWorkerOptions;
+  } catch (e) {
+    // last resort leave as null; we'll guard at runtime
+    getDocument = null;
+    GlobalWorkerOptions = null;
+  }
+}
+
+// Helper: extract text from PPTX
 async function extractFromPptx(buffer: Buffer): Promise<string> {
   const zip = await JSZip.loadAsync(buffer);
   const parser = new XMLParser({
@@ -38,7 +72,7 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
       if ("t" in node) {
         const t = node["t"];
         if (typeof t === "string") texts.push(t);
-        else if (typeof t === "object" && t["#text"]) texts.push(t["#text"]);
+        else if (typeof t === "object" && t["#text"]) texts.push(node["#text"] || "");
       }
       for (const k of Object.keys(node)) {
         const child = node[k];
@@ -52,7 +86,7 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
     if (slideText) slideTexts.push(slideText);
   }
 
-  // notes (optional)
+  // notes
   const notesFiles = Object.keys(zip.files)
     .filter((p) => p.startsWith("ppt/notesSlides/notesSlide") && p.endsWith(".xml"))
     .sort();
@@ -70,7 +104,7 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
       if ("t" in node) {
         const t = node["t"];
         if (typeof t === "string") texts.push(t);
-        else if (typeof t === "object" && t["#text"]) texts.push(t["#text"]);
+        else if (typeof t === "object" && node["#text"]) texts.push(node["#text"] || "");
       }
       for (const k of Object.keys(node)) {
         const child = node[k];
@@ -92,11 +126,26 @@ async function extractFromPptx(buffer: Buffer): Promise<string> {
   return combined.trim();
 }
 
+// Helper: extract text from PDF using runtime getDocument (pdfjs)
 async function extractFromPdf(buffer: Buffer): Promise<string> {
+  if (!getDocument) {
+    console.error("pdf extraction unavailable: getDocument not found");
+    return "";
+  }
+
   try {
+    // set workerSrc to empty (node environment) if available
+    try {
+      if (GlobalWorkerOptions) {
+        GlobalWorkerOptions.workerSrc = GlobalWorkerOptions.workerSrc || "";
+      }
+    } catch (e) {
+      // ignore
+    }
+
     const uint8 = new Uint8Array(buffer);
     const loadingTask = getDocument({ data: uint8 });
-    const pdf = await loadingTask.promise;
+    const pdf: any = await loadingTask.promise;
     const numPages = pdf.numPages || 0;
     const pages: string[] = [];
 
@@ -104,8 +153,7 @@ async function extractFromPdf(buffer: Buffer): Promise<string> {
       try {
         const page = await pdf.getPage(i);
         const textContent = await page.getTextContent();
-        const strings =
-          (textContent.items?.map((it: any) => ("str" in it ? it.str : "")).filter(Boolean) as string[]) || [];
+        const strings = (textContent.items?.map((it: any) => ("str" in it ? it.str : "")).filter(Boolean)) || [];
         pages.push(strings.join(" "));
       } catch (pageErr) {
         console.error(`pdfjs page ${i} err`, pageErr);
@@ -119,7 +167,7 @@ async function extractFromPdf(buffer: Buffer): Promise<string> {
   }
 }
 
-export default async function handler(req: Req, res: Res) {
+export default async function handler(req: VercelReq, res: VercelRes) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Use POST" });
     return;
@@ -129,7 +177,7 @@ export default async function handler(req: Req, res: Res) {
     const SUPABASE_URL = process.env.SUPABASE_URL;
     const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
     if (!SUPABASE_URL || !SERVICE_ROLE) {
-      res.status(500).json({ error: "Missing server env vars" });
+      res.status(500).json({ error: "Missing server env vars (SUPABASE_URL / SUPABASE_SERVICE_ROLE)" });
       return;
     }
 
@@ -210,6 +258,7 @@ export default async function handler(req: Req, res: Res) {
       .eq("id", doc_id);
 
     if (upErr) {
+      console.error("DB update failed", upErr);
       res.status(500).json({ error: `DB update failed: ${upErr.message}` });
       return;
     }
